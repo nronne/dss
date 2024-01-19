@@ -1,44 +1,19 @@
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-from dss.utils import TruncatedNormal
+from dss.utils import TruncatedNormal, OFFSET_LIST
 from schnetpack import properties  # change to use this at some point
 from schnetpack.atomistic import PairwiseDistances
 from schnetpack.data.loader import _atoms_collate_fn
 from schnetpack.transform import WrapPositions
 
-OFFSET_LIST = [
-    [-1, -1, -1],
-    [-1, -1, 0],
-    [-1, -1, 1],
-    [-1, 0, -1],
-    [-1, 0, 0],
-    [-1, 0, 1],
-    [-1, 1, -1],
-    [-1, 1, 0],
-    [-1, 1, 1],
-    [0, -1, -1],
-    [0, -1, 0],
-    [0, -1, 1],
-    [0, 0, -1],
-    [0, 0, 0],
-    [0, 0, 1],
-    [0, 1, -1],
-    [0, 1, 0],
-    [0, 1, 1],
-    [1, -1, -1],
-    [1, -1, 0],
-    [1, -1, 1],
-    [1, 0, -1],
-    [1, 0, 0],
-    [1, 0, 1],
-    [1, 1, -1],
-    [1, 1, 0],
-    [1, 1, 1],
-]
-
-
 class VPDiffusion(pl.LightningModule):
+
+    """
+    Implements variance-preserving diffusion (VP-Diffusion) as described in
+    
+    """
+    
     def __init__(
         self,
         score_model,
@@ -83,8 +58,7 @@ class VPDiffusion(pl.LightningModule):
         self.optim_config = optim_config
         self.scheduler_config = scheduler_config
 
-    def setup(self, stage=None):
-        self.offsets = torch.tensor(OFFSET_LIST).float().to(self.device)
+    ### Diffusion Methods ###
 
     def beta_t(self, t):
         return self.beta_min + t * (self.beta_max - self.beta_min)
@@ -104,7 +78,9 @@ class VPDiffusion(pl.LightningModule):
     def marginal_probability(self, t):
         return 1 - torch.exp(-self.alpha_t(t))
 
-    # LightningModule methods
+    ### LightningModule Methods ###
+    def setup(self, stage=None):
+        self.offsets = torch.tensor(OFFSET_LIST).float().to(self.device)
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         losses = self.loss(batch, batch_idx)
@@ -131,178 +107,6 @@ class VPDiffusion(pl.LightningModule):
             "lr_scheduler": scheduler,
             "monitor": "val_loss",
         }
-
-    def forward(self, batch, t, prob=0.0, condition=None):
-        if (
-            "scalar_representation" not in batch
-            and "vector_representation" not in batch
-        ):
-            batch = self.preprocess_batch(batch)
-        v = self.score_model(batch, t, prob=prob, condition=condition).view(
-            batch[properties.R].shape
-        )
-        return v
-
-    def sample_forward(self, batch, t, w=None, condition=None):
-        # if self.potential_model is not None:
-        #     self.potential_model.initialize_derivatives(batch)
-
-        if w is None:
-            return self.forward(batch, t)
-        else:
-            if (
-                "scalar_representation" not in batch
-                and "vector_representation" not in batch
-            ):
-                batch = self.preprocess_batch(batch)
-
-            s0 = self.score_model(batch, t, prob=1.0, condition=condition).view(
-                batch[properties.R].shape
-            )
-            s1 = self.score_model(batch, t).view(batch[properties.R].shape)
-
-            s = (1 + w) * s0 - w * s1
-
-            return s
-
-    @torch.set_grad_enabled(True)
-    def potential(self, batch):
-        batch = self.preprocess_batch(batch, save_keys=[])
-        self.potential_model(batch)
-        return batch
-
-    def batch_wrap(self, batch):  # Make decorator for batching functions like this
-        batch_list = self._split_batch(batch)
-        for i in range(len(batch_list)):
-            batch_list[i] = self.wrap_positions(batch_list[i])
-
-        batch = self._collate_batch(batch_list)
-        return batch
-
-    def periodic_distance(self, X, N, cell):  # TODO
-        """
-        TODO
-        X: (N, 3)
-        N: (N, 3)
-        cell: (3, 3)
-
-        Takes X and N (noise) and computes the minimum distance between X and Y=X+N
-        taking into account periodic boundary conditions.
-        """
-        cell_offsets = torch.matmul(self.offsets, cell)
-        Y = X + N
-
-        # Compute distances between X and Y + cell_offsets
-        Y = Y.unsqueeze(1)
-        cell_offsets = cell_offsets.unsqueeze(0)
-        Y = Y + cell_offsets
-        distances = torch.norm(X.unsqueeze(1) - Y, dim=2)
-
-        argmin_distances = torch.argmin(distances, dim=1)
-        # find the Y that minimizes the distance
-        Y = Y[torch.arange(Y.shape[0]), argmin_distances]
-        min_N = Y - X
-
-        return min_N
-
-    def batch_clone(self, batch, ignore=()):
-        batch_copy = {}
-        for key in batch.keys():
-            if key not in ignore:
-                batch_copy[key] = batch[key].clone()
-
-        return batch_copy
-
-    def _split_batch(self, batch):
-        atom_types = batch[properties.Z]
-        positions = batch[properties.R]
-        n_atoms = batch[properties.n_atoms]
-        idx_m = batch[properties.idx_m]
-        cells = batch[properties.cell]
-        pbc = batch[properties.pbc]
-
-        mask = batch.get("mask", torch.zeros_like(positions, dtype=torch.bool))
-
-        n_structures = n_atoms.shape[0]
-
-        z_confinement = batch.get("z_confinement", None)
-
-        if z_confinement is not None:
-            z_confinement = z_confinement.view(n_structures, 2)
-
-        output_list = []
-        idx_c = 0
-        for idx in range(n_structures):
-            curr_n_atoms = n_atoms[idx]
-            inputs = {
-                properties.n_atoms: torch.tensor([curr_n_atoms]),
-                properties.Z: atom_types[idx_c : idx_c + curr_n_atoms],
-                properties.R: positions[idx_c : idx_c + curr_n_atoms],
-                "mask": mask[idx_c : idx_c + curr_n_atoms],
-            }
-
-            if cells is None:
-                inputs[properties.cell] = None
-                inputs[properties.pbc] = None
-            else:
-                inputs[properties.cell] = cells[idx][None, :, :]
-                inputs[properties.pbc] = pbc[idx][None]
-
-            if z_confinement is not None:
-                inputs["z_confinement"] = z_confinement[idx]
-
-            idx_c += curr_n_atoms
-            output_list.append(inputs)
-
-        return output_list
-
-    def _collate_batch(self, batch_list):
-        return _atoms_collate_fn(batch_list)
-
-    def _random_positions(self, structure):
-        positions = structure[properties.R]
-        cell = structure[properties.cell].clone().view(3, 3)
-        corner = torch.zeros(3)
-
-        if structure.get("z_confinement", None) is not None:
-            cell[2, 2] = structure["z_confinement"][1] - structure["z_confinement"][0]
-            corner[2] = structure["z_confinement"][0]
-
-        mask = structure.get(
-            "mask", torch.zeros_like(positions, dtype=torch.bool)
-        ).bool()
-
-        f = torch.rand_like(positions)
-        random_positions = torch.matmul(f, cell) + corner
-        structure[properties.R][~mask] = random_positions[~mask]
-
-        return structure
-
-    def batch_random_positions(self, batch):
-        batch_list = self._split_batch(batch)
-        for i in range(len(batch_list)):
-            batch_list[i] = self._random_positions(batch_list[i])
-
-        batch = self._collate_batch(batch_list)
-        return batch
-
-    def preprocess_batch(self, batch, save_keys=["energy", "forces"]):
-        saved = {}
-        for key in save_keys:
-            if key in batch:
-                saved[key] = batch[key]
-
-        batch_list = self._split_batch(batch)
-        for i in range(len(batch_list)):
-            batch_list[i] = self.neighbour_list(batch_list[i])
-            batch_list[i] = self.pairwise_distance(batch_list[i])
-
-        batch = self._collate_batch(batch_list)
-
-        for key in saved:
-            batch[key] = saved[key]
-
-        return batch
 
     def loss(self, batch, batch_idx):
         ### score matching loss
@@ -382,6 +186,93 @@ class VPDiffusion(pl.LightningModule):
             "pot_loss": pot_loss,
         }
         return losses
+
+    def forward(self, batch, t, prob=0.0, condition=None):
+        if (
+            "scalar_representation" not in batch
+            and "vector_representation" not in batch
+        ):
+            batch = self.preprocess_batch(batch)
+        v = self.score_model(batch, t, prob=prob, condition=condition).view(
+            batch[properties.R].shape
+        )
+        return v
+
+    ### Methods ###
+
+    def sample_forward(self, batch, t, w=None, condition=None):
+        # if self.potential_model is not None:
+        #     self.potential_model.initialize_derivatives(batch)
+
+        if w is None:
+            return self.forward(batch, t)
+        else:
+            if (
+                "scalar_representation" not in batch
+                and "vector_representation" not in batch
+            ):
+                batch = self.preprocess_batch(batch)
+
+            s0 = self.score_model(batch, t, prob=1.0, condition=condition).view(
+                batch[properties.R].shape
+            )
+            s1 = self.score_model(batch, t).view(batch[properties.R].shape)
+
+            s = (1 + w) * s0 - w * s1
+
+            return s
+
+    @torch.set_grad_enabled(True)
+    def potential(self, batch):
+        batch = self.preprocess_batch(batch, save_keys=[])
+        self.potential_model(batch)
+        return batch
+
+    def periodic_distance(self, X, N, cell):  # TODO
+        """
+        TODO
+        X: (N, 3)
+        N: (N, 3)
+        cell: (3, 3)
+
+        Takes X and N (noise) and computes the minimum distance between X and Y=X+N
+        taking into account periodic boundary conditions.
+        """
+        cell_offsets = torch.matmul(self.offsets, cell)
+        Y = X + N
+
+        # Compute distances between X and Y + cell_offsets
+        Y = Y.unsqueeze(1)
+        cell_offsets = cell_offsets.unsqueeze(0)
+        Y = Y + cell_offsets
+        distances = torch.norm(X.unsqueeze(1) - Y, dim=2)
+
+        argmin_distances = torch.argmin(distances, dim=1)
+        # find the Y that minimizes the distance
+        Y = Y[torch.arange(Y.shape[0]), argmin_distances]
+        min_N = Y - X
+
+        return min_N
+
+    def preprocess_batch(self, batch, save_keys=["energy", "forces"]):
+        saved = {}
+        for key in save_keys:
+            if key in batch:
+                saved[key] = batch[key]
+
+        batch_list = self._split_batch(batch)
+        for i in range(len(batch_list)):
+            batch_list[i] = self.neighbour_list(batch_list[i])
+            batch_list[i] = self.pairwise_distance(batch_list[i])
+
+        batch = self._collate_batch(batch_list)
+
+        for key in saved:
+            batch[key] = saved[key]
+
+        return batch
+
+    ### Samplers ###
 
     @torch.no_grad()
     def sample(self, batch, num_steps=1000, save_traj=False, w=None, condition=None):
@@ -544,46 +435,98 @@ class VPDiffusion(pl.LightningModule):
                 clone["score"] = s
                 traj.append(clone)
 
-        # for time in time_steps:
-        #     t = torch.ones((batch["_idx_m"].shape[0], 1)) * time
-        #     disp = self.dispersion(time)
-
-        #     batch = self.potential(batch)
-        #     s = self.sample_forward(batch, t, w=w, condition=condition)
-
-        #     E, F = batch[properties.energy], batch[properties.forces]
-        #     drift = disp**2 * s - self.forward_drift(batch[properties.R], t)
-
-        #     # # run idx 2
-        #     # if time < 0.1:
-        #     #     noise = t * torch.randn_like(batch[properties.R]) + (1-time) * F
-        #     # else:
-        #     #     noise = torch.randn_like(batch[properties.R])
-
-        #     # # run idx 3
-        #     guidance = (1-time) * 0.01 * F
-        #     noise = torch.randn_like(batch[properties.R]) + guidance
-
-        #     # # run idx 4: baseline
-        #     # noise = torch.randn_like(batch[properties.R])
-
-        #     x_step = step_size * drift + torch.sqrt(step_size) * disp * noise
-        #     x_step[mask] = 0
-
-        #     batch[properties.R] = batch[properties.R] + x_step
-
-        #     print(
-        #         f"time: {time:.2f}, Mean energy: {E.mean():.2f}, Mean height: {batch[properties.R][:,2].mean():.2f}"
-        #     )
-
-        # batch = self.batch_wrap(batch)
-
-        # if save_traj:
-        #     clone = self.batch_clone(batch)
-        #     clone["score"] = s
-        #     traj.append(clone)
-
         if save_traj:
             return batch, traj
         else:
             return batch
+
+    ### Utility Methods ###
+
+    def batch_wrap(self, batch):  # Make decorator for batching functions like this
+        batch_list = self._split_batch(batch)
+        for i in range(len(batch_list)):
+            batch_list[i] = self.wrap_positions(batch_list[i])
+
+        batch = self._collate_batch(batch_list)
+        return batch
+
+    def batch_clone(self, batch, ignore=()):
+        batch_copy = {}
+        for key in batch.keys():
+            if key not in ignore:
+                batch_copy[key] = batch[key].clone()
+
+        return batch_copy
+
+    def batch_random_positions(self, batch):
+        batch_list = self._split_batch(batch)
+        for i in range(len(batch_list)):
+            batch_list[i] = self._random_positions(batch_list[i])
+
+        batch = self._collate_batch(batch_list)
+        return batch
+
+    def _split_batch(self, batch):
+        atom_types = batch[properties.Z]
+        positions = batch[properties.R]
+        n_atoms = batch[properties.n_atoms]
+        idx_m = batch[properties.idx_m]
+        cells = batch[properties.cell]
+        pbc = batch[properties.pbc]
+
+        mask = batch.get("mask", torch.zeros_like(positions, dtype=torch.bool))
+
+        n_structures = n_atoms.shape[0]
+
+        z_confinement = batch.get("z_confinement", None)
+
+        if z_confinement is not None:
+            z_confinement = z_confinement.view(n_structures, 2)
+
+        output_list = []
+        idx_c = 0
+        for idx in range(n_structures):
+            curr_n_atoms = n_atoms[idx]
+            inputs = {
+                properties.n_atoms: torch.tensor([curr_n_atoms]),
+                properties.Z: atom_types[idx_c : idx_c + curr_n_atoms],
+                properties.R: positions[idx_c : idx_c + curr_n_atoms],
+                "mask": mask[idx_c : idx_c + curr_n_atoms],
+            }
+
+            if cells is None:
+                inputs[properties.cell] = None
+                inputs[properties.pbc] = None
+            else:
+                inputs[properties.cell] = cells[idx][None, :, :]
+                inputs[properties.pbc] = pbc[idx][None]
+
+            if z_confinement is not None:
+                inputs["z_confinement"] = z_confinement[idx]
+
+            idx_c += curr_n_atoms
+            output_list.append(inputs)
+
+        return output_list
+
+    def _collate_batch(self, batch_list):
+        return _atoms_collate_fn(batch_list)
+
+    def _random_positions(self, structure):
+        positions = structure[properties.R]
+        cell = structure[properties.cell].clone().view(3, 3)
+        corner = torch.zeros(3)
+
+        if structure.get("z_confinement", None) is not None:
+            cell[2, 2] = structure["z_confinement"][1] - structure["z_confinement"][0]
+            corner[2] = structure["z_confinement"][0]
+
+        mask = structure.get(
+            "mask", torch.zeros_like(positions, dtype=torch.bool)
+        ).bool()
+
+        f = torch.rand_like(positions)
+        random_positions = torch.matmul(f, cell) + corner
+        structure[properties.R][~mask] = random_positions[~mask]
+
+        return structure
