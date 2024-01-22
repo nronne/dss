@@ -89,7 +89,7 @@ def get_dataset(
 
     return dataset
 
-def get_diffusion_model():
+def get_diffusion_model(cutoff=6.0):
     import schnetpack as spk
 
     from dss.diffusion import VPDiffusion
@@ -97,7 +97,6 @@ def get_diffusion_model():
                             NodeEmbedding, Potential)
     from dss.utils import TorchNeighborList
 
-    cutoff = 6.0
     neighbour_list = TorchNeighborList(cutoff=cutoff)
 
     n_atom_basis = 64
@@ -136,7 +135,7 @@ def get_diffusion_model():
         scheduler_config={"factor": 0.90, "patience": 100},
     )
 
-    return diffusion
+    return diffusion, neighbour_list
 
 def sample(diffusion, num_samples):
     import numpy as np
