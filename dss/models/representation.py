@@ -3,7 +3,7 @@ import schnetpack as spk
 from schnetpack import properties
 from typing import Dict
 
-
+## remove file completely
 
 class ConditionalPaiNN(spk.representation.PaiNN):
     def __init__(self, n_interactions, radial_basis, embedding, max_z=100, **kwargs):

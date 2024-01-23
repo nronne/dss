@@ -3,7 +3,9 @@ import torch.nn as nn
 from pytorch_lightning import LightningModule
 from schnetpack import properties
 
-class NodeEmbedding(LightningModule):
+
+
+class NodeEmbedding(LightningModule): # remove and rename file conditioning
     def __init__(self, type_dim=32, time_dim=2, conditioning=None):
         super().__init__()
         self.type_embedding = nn.Embedding(

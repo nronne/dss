@@ -49,7 +49,7 @@ class VPDiffusion(pl.LightningModule):
         self.potential_model = potential_model
         self.loss_config = loss_config
 
-        if self.score_model.representation.embedding.cond_dim > 0:
+        if self.score_model.cond_dim > 0:
             self.train_prob = condition_config.get("train_prob", 0.5)
         else:
             self.train_prob = 0.0

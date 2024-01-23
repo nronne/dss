@@ -89,8 +89,8 @@ class ConditionedScoreModel(LightningModule):
         self.omega = 2 * torch.pi
         self.cond_dim = conditioning.dim if conditioning is not None else 0
         self.net = build_gated_equivariant_mlp(
-            self.representation.embedding.dim + time_dim + self.cond_dim,
-            self.representation.embedding.dim,
+            self.representation.n_atom_basis + time_dim + self.cond_dim,
+            self.representation.n_atom_basis,
             1,
             n_layers=gated_blocks,
         )
@@ -128,7 +128,7 @@ class ConditionedScoreModel(LightningModule):
         return vector
 
 
-class ScoreModel(LightningModule):
+class ScoreModel(LightningModule): # probably remove
     def __init__(self, representation, **kwargs):
         super().__init__(**kwargs)
         self.representation = representation

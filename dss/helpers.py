@@ -111,7 +111,7 @@ def get_diffusion_model(cutoff=6.0):
     score_model = ConditionedScoreModel(representation, time_dim=2, gated_blocks=4)
 
     pred_energy = spk.atomistic.Atomwise(
-        n_in=representation.embedding.dim, output_key="energy"
+        n_in=representation.n_atom_basis, output_key="energy"
     )
     pred_forces = spk.atomistic.Forces(energy_key="energy", force_key="forces")
     pairwise_distance = spk.atomistic.PairwiseDistances()
