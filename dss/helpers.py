@@ -23,9 +23,9 @@ def get_dataset(
         c = SinglePointCalculator(a, energy=e, forces=f)
         a.set_calculator(c)
         mask = np.zeros_like(f, dtype=bool)
-        mask[a.get_positions()[:, 2] < 2.5] = True
+        mask[a.get_positions()[:, 2] < 2.6] = True
 
-        z_confinement = [2.5, 8]
+        z_confinement = [2.5, 7.8]
 
         properties = {
             "energy": np.array([e]),
@@ -101,9 +101,8 @@ def get_diffusion_model(cutoff=6.0):
 
     n_atom_basis = 64
     radial_basis = spk.nn.GaussianRBF(n_rbf=30, cutoff=cutoff)
-    embedding = NodeEmbedding(n_atom_basis, time_dim=0)
-    representation = ConditionalPaiNN(
-        embedding=embedding,
+    representation = spk.representation.PaiNN(
+        n_atom_basis=n_atom_basis,
         n_interactions=4,
         radial_basis=radial_basis,
         cutoff_fn=spk.nn.CosineCutoff(cutoff),
@@ -137,7 +136,7 @@ def get_diffusion_model(cutoff=6.0):
 
     return diffusion, neighbour_list
 
-def sample(diffusion, num_samples):
+def sample(diffusion, num_samples, template, symbols):
     import numpy as np
     import schnetpack as spk
     import torch
@@ -156,10 +155,6 @@ def sample(diffusion, num_samples):
             atoms.append(a)
         return atoms
 
-    N_Ag, N_O = 6, 3
-    template = read("/home/roenne/documents/pgm/examples/AgxOy/ag111-3x3.traj")
-    # template = read('/home/roenne/documents/pgm/examples/AgxOy/template.traj')
-
     converter = spk.interfaces.AtomsConverter(
         neighbor_list=None,
         additional_inputs={
@@ -167,28 +162,28 @@ def sample(diffusion, num_samples):
                 np.vstack(
                     [
                         np.ones((len(template), 3), dtype=bool),
-                        np.zeros((N_O + N_Ag, 3), dtype=bool),
+                        np.zeros((len(symbols), 3), dtype=bool),
                     ]
                 )
             ),
-            "z_confinement": torch.tensor(np.array([2.5, 8.0])),
+            "z_confinement": torch.tensor(np.array([2.5, 7.8])),
         },
     )
 
     # generate data
-    n_split = 50
+    n_split = 50 if num_samples > 50 else num_samples
 
     all_atoms = []
     for i in range(num_samples // n_split):
         atoms_data = []
         for _ in range(n_split):
-            symbols = ["Ag"] * len(template) + ["Ag"] * N_Ag + ["O"] * N_O
+            all_symbols = ["Ag"] * len(template) + symbols
             positions = np.vstack(
-                (template.get_positions(), np.zeros((len(symbols) - len(template), 3)))
+                (template.get_positions(), np.zeros((len(symbols), 3)))
             )
             atoms_data.append(
                 Atoms(
-                    symbols,
+                    all_symbols,
                     positions=positions,
                     cell=template.get_cell(),
                     pbc=template.get_pbc(),
@@ -218,4 +213,6 @@ def sample(diffusion, num_samples):
         atoms = to_atoms(batch_list)
         all_atoms += atoms
 
-        write("Ag6O3_Ag9_sampled_confined_RG.traj", all_atoms)
+        # write("Ag6O3_Ag9_sampled_confined_RG.traj", all_atoms)
+
+    return all_atoms
