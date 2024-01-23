@@ -1,19 +1,23 @@
+from typing import Dict, List
+
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-from dss.utils import TruncatedNormal, OFFSET_LIST
 from schnetpack import properties  # change to use this at some point
 from schnetpack.atomistic import PairwiseDistances
 from schnetpack.data.loader import _atoms_collate_fn
 from schnetpack.transform import WrapPositions
 
+from dss.utils import OFFSET_LIST, TruncatedNormal
+
+
 class VPDiffusion(pl.LightningModule):
 
     """
-    Implements variance-preserving diffusion (VP-Diffusion) as described in
-    
+    Implements variance-preserving diffusion (VP-Diffusion) using a score model.
+
     """
-    
+
     def __init__(
         self,
         score_model,
@@ -36,6 +40,38 @@ class VPDiffusion(pl.LightningModule):
         optim_config={"lr": 1e-3},
         scheduler_config={"factor": 0.05, "patience": 20},
     ):
+        """
+        Args
+        ______
+        score_model: torch.nn.Module
+            A score model that takes a batch of data and outputs a score for each atom.
+        neighbour_list: schnetpack.atomistic.NeighbourList
+            A neighbour list that takes a batch of data and outputs a neighbour list
+            for each atom.
+        potential_model: torch.nn.Module
+            A potential model that takes a batch of data and outputs the energy and
+            forces for each atom.
+        pairwise_distance: schnetpack.atomistic.PairwiseDistances
+            A pairwise distance module that takes a batch of data and outputs
+            the pairwise distances for each atom.
+        potential_head: bool
+            Whether to use the potential model as a head of the score model.
+        beta_min: float
+            The minimum value of beta.
+        beta_max: float
+            The maximum value of beta.
+        eps: float
+            A small value to add to the variance to avoid numerical issues.
+        condition_config: dict
+            A dictionary of configuration options for conditioning the score model.
+        loss_config: dict
+            A dictionary of configuration options for the loss function.
+        optim_config: dict
+            A dictionary of configuration options for the optimizer.
+        scheduler_config: dict
+            A dictionary of configuration options for the learning rate scheduler.
+
+        """
         super(VPDiffusion, self).__init__()
         self.score_model = score_model
         self.neighbour_list = neighbour_list
@@ -60,35 +96,160 @@ class VPDiffusion(pl.LightningModule):
 
     ### Diffusion Methods ###
 
-    def beta_t(self, t):
+    def beta_t(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the value of beta at time t.
+
+        Args
+        ______
+        t: torch.Tensor
+            The time at which to calculate beta.
+
+        Returns
+        _______
+        beta: torch.Tensor
+            The value of beta at time t.
+
+        """
+
         return self.beta_min + t * (self.beta_max - self.beta_min)
 
-    def alpha_t(self, t):
+    def alpha_t(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the value of alpha at time t.
+
+        Args
+        ______
+        t: torch.Tensor
+            The time at which to calculate alpha.
+
+        Returns
+        _______
+        alpha: torch.Tensor
+            The value of alpha at time t.
+
+        """
         return t * self.beta_min + 0.5 * t**2 * (self.beta_max - self.beta_min)
 
-    def forward_drift(self, x, t):
+    def forward_drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the drift term of the diffusion process.
+
+        Args
+        ______
+        x: torch.Tensor
+            The positions of the atoms.
+        t: torch.Tensor
+            The time at which to calculate the drift term.
+
+        Returns
+        _______
+        drift: torch.Tensor
+            The drift term of the diffusion process.
+        """
         return -0.5 * self.beta_t(t) * x
 
-    def dispersion(self, t):
+    def dispersion(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the dispersion term of the diffusion process.
+
+        Args
+        ______
+        t: torch.Tensor
+            The time at which to calculate the dispersion term.
+
+        Returns
+        _______
+        dispersion: torch.Tensor
+            The dispersion term of the diffusion process.
+        """
         return torch.sqrt(self.beta_t(t))
 
-    def mean_factor(self, t):
+    def mean_factor(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the mean factor of the diffusion process.
+
+        Args
+        ______
+        t: torch.Tensor
+            The time at which to calculate the mean factor.
+
+        Returns
+        _______
+        mean_factor: torch.Tensor
+            The mean factor of the diffusion process.
+        """
         return torch.exp(-self.alpha_t(t))
 
-    def marginal_probability(self, t):
+    def marginal_probability(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates the marginal probability of the diffusion process.
+
+        Args
+        ______
+        t: torch.Tensor
+            The time at which to calculate the marginal probability.
+
+        Returns
+        _______
+        marginal_probability: torch.Tensor
+            The marginal probability of the diffusion process.
+        """
         return 1 - torch.exp(-self.alpha_t(t))
 
     ### LightningModule Methods ###
-    def setup(self, stage=None):
+    def setup(self, stage: str = None) -> None:
+        """
+        Sets up the model.
+
+        Args
+        ______
+        stage: str
+            The stage of training.
+
+        """
+
         self.offsets = torch.tensor(OFFSET_LIST).float().to(self.device)
 
-    def training_step(self, batch, batch_idx) -> torch.Tensor:
+    def training_step(self, batch: Dict, batch_idx: torch.Tensor) -> torch.Tensor:
+        """
+        Performs a training step.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        batch_idx: torch.Tensor
+            The index of the batch.
+
+        Returns
+        _______
+        loss: torch.Tensor
+            The loss of the training step.
+
+        """
         losses = self.loss(batch, batch_idx)
         for k, v in losses.items():
             self.log("train_" + k, v)
         return losses["loss"]
 
-    def validation_step(self, batch, batch_idx) -> torch.Tensor:
+    def validation_step(self, batch: Dict, batch_idx: torch.Tensor) -> torch.Tensor:
+        """
+        Performs a validation step.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        batch_idx: torch.Tensor
+            The index of the batch.
+
+        Returns
+        _______
+        loss: torch.Tensor
+            The loss of the validation step.
+
+        """
         if self.potential_model is not None:
             torch.set_grad_enabled(True)
 
@@ -97,7 +258,17 @@ class VPDiffusion(pl.LightningModule):
             self.log("val_" + k, v)
         return losses["loss"]
 
-    def configure_optimizers(self):
+    def configure_optimizers(self) -> Dict:
+        """
+        Configures the optimizer and learning rate scheduler.
+
+        Returns
+        _______
+        optimizers: dict
+            A dictionary of optimizers and learning rate schedulers.
+
+
+        """
         optimizer = torch.optim.Adam(self.parameters(), **self.optim_config)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, **self.scheduler_config
@@ -108,7 +279,23 @@ class VPDiffusion(pl.LightningModule):
             "monitor": "val_loss",
         }
 
-    def loss(self, batch, batch_idx):
+    def loss(self, batch: Dict, batch_idx: torch.Tensor) -> Dict:
+        """
+        Calculates the loss.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        batch_idx: torch.Tensor
+            The index of the batch.
+
+        Returns
+        _______
+        losses: dict
+            A dictionary of losses.
+
+        """
         ### score matching loss
         noised_batch = self.batch_clone(batch)
         mask = batch.get(
@@ -187,7 +374,33 @@ class VPDiffusion(pl.LightningModule):
         }
         return losses
 
-    def forward(self, batch, t, prob=0.0, condition=None):
+    def forward(
+        self,
+        batch: Dict,
+        t: torch.Tensor,
+        prob: float = 0.0,
+        condition: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Performs a forward pass.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        t: torch.Tensor
+            The random variable.
+        prob: float
+            The probability of using the conditional model.
+        condition: torch.Tensor
+            The condition for the conditional model.
+
+        Returns
+        _______
+        score: torch.Tensor
+            The score.
+
+        """
         if (
             "scalar_representation" not in batch
             and "vector_representation" not in batch
@@ -200,7 +413,33 @@ class VPDiffusion(pl.LightningModule):
 
     ### Methods ###
 
-    def sample_forward(self, batch, t, w=None, condition=None):
+    def sample_forward(
+        self,
+        batch: Dict,
+        t: torch.Tensor,
+        w: float = None,
+        condition: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Performs a forward sampling
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        t: torch.Tensor
+            The random variable.
+        w: float
+            The weight of the conditional model.
+        condition: torch.Tensor
+            The condition for the conditional model.
+
+        Returns
+        _______
+        score: torch.Tensor
+            The score.ing
+
+        """
         # if self.potential_model is not None:
         #     self.potential_model.initialize_derivatives(batch)
 
@@ -223,20 +462,45 @@ class VPDiffusion(pl.LightningModule):
             return s
 
     @torch.set_grad_enabled(True)
-    def potential(self, batch):
+    def potential(self, batch: Dict):
+        """
+        Predict energy and forces
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+
+        Returns
+        _______
+        batch: dict
+            The batch of data with the predicted energy and forces
+
+        """
         batch = self.preprocess_batch(batch, save_keys=[])
         self.potential_model(batch)
         return batch
 
-    def periodic_distance(self, X, N, cell):  # TODO
+    def periodic_distance(
+        self, X: torch.Tensor, N: torch.Tensor, cell: torch.Tensor
+    ) -> torch.Tensor:
         """
-        TODO
-        X: (N, 3)
-        N: (N, 3)
-        cell: (3, 3)
-
         Takes X and N (noise) and computes the minimum distance between X and Y=X+N
         taking into account periodic boundary conditions.
+
+        Args
+        ______
+        X: torch.Tensor
+            The positions (N, 3)
+        N: torch.Tensor
+            The noise (N, 3)
+        cell: torch.Tensor
+            The cell (3, 3)
+
+        Returns
+        _______
+        dist: torch.Tensor
+            The distance between X and Y=X+N
         """
         cell_offsets = torch.matmul(self.offsets, cell)
         Y = X + N
@@ -254,7 +518,28 @@ class VPDiffusion(pl.LightningModule):
 
         return min_N
 
-    def preprocess_batch(self, batch, save_keys=["energy", "forces"]):
+    def preprocess_batch(
+        self, batch: Dict, save_keys: List = ["energy", "forces"]
+    ) -> Dict:
+        """
+        Preprocess the batch of data by calculating neighbourlist and pairwise
+        distances between atoms
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        save_keys: list
+            The keys to save in the batch
+
+        Returns
+        _______
+        batch: dict
+            The batch of data with the calculated neighbourlist and pairwise
+            distances between atoms
+
+        """
+
         saved = {}
         for key in save_keys:
             if key in batch:
@@ -275,9 +560,34 @@ class VPDiffusion(pl.LightningModule):
     ### Samplers ###
 
     @torch.no_grad()
-    def sample(self, batch, num_steps=1000, save_traj=False, w=None, condition=None):
+    def sample(
+        self,
+        batch: Dict,
+        num_steps: int = 1000,
+        save_traj: bool = False,
+        w: float = None,
+        condition: torch.Tensor = None,
+    ) -> Dict:
         """
         This implements the Euler-Maruyama method for sampling from a diffusion process.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        num_steps: int
+            The number of steps to sample.
+        save_traj: bool
+            Whether to save the trajectory.
+        w: float
+            The weight of the conditional model.
+        condition: torch.Tensor
+            The condition for the conditional model.
+
+        Returns
+        _______
+        batch: dict
+            The batch of data with the sampled trajectory.
         """
         batch = self.batch_random_positions(batch)
         if num_steps == 0 and not save_traj:
@@ -349,10 +659,32 @@ class VPDiffusion(pl.LightningModule):
 
     @torch.no_grad()
     def regressor_guidance_sample(
-        self, batch, num_steps=1000, save_traj=False, w=None, condition=None, eta=1e-3
-    ):
+        self,
+        batch: Dict,
+        num_steps: int=1000,
+        save_traj: bool=False,
+        w: float=None,
+        condition: torch.Tensor=None,
+        eta: float=1e-3) -> Dict:
         """
-        This implements the Euler-Maruyama method for sampling from a diffusion process.
+        This implements the Euler-Maruyama method for sampling from a diffusion process
+        using regressor-guidance.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        num_steps: int
+            The number of steps to sample.
+        save_traj: bool
+            Whether to save the trajectory.
+        w: float
+            The weight of the conditional model.
+        condition: torch.Tensor
+            The condition for the conditional model.
+        eta: float
+            The learning rate for the regressor.
+        
         """
         assert self.potential_model is not None, "Potential model is not defined."
 
@@ -442,7 +774,22 @@ class VPDiffusion(pl.LightningModule):
 
     ### Utility Methods ###
 
-    def batch_wrap(self, batch):  # Make decorator for batching functions like this
+    # Make decorator for batching functions like this
+    def batch_wrap(self, batch: Dict) -> Dict:  
+        """
+        Wraps all atoms into periodic cell in batch.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+
+        Returns
+        _______
+        batch: dict
+            A batch of data with wrapped atoms.
+        
+        """
         batch_list = self._split_batch(batch)
         for i in range(len(batch_list)):
             batch_list[i] = self.wrap_positions(batch_list[i])
@@ -450,7 +797,23 @@ class VPDiffusion(pl.LightningModule):
         batch = self._collate_batch(batch_list)
         return batch
 
-    def batch_clone(self, batch, ignore=()):
+    def batch_clone(self, batch: Dict, ignore: List=()) -> Dict:
+        """
+        Clones a batch of data.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+        ignore: list
+            A list of properties to ignore.
+
+        Returns
+        _______
+        batch: dict
+            A cloned batch of data.
+        
+        """
         batch_copy = {}
         for key in batch.keys():
             if key not in ignore:
@@ -458,7 +821,21 @@ class VPDiffusion(pl.LightningModule):
 
         return batch_copy
 
-    def batch_random_positions(self, batch):
+    def batch_random_positions(self, batch: Dict) -> Dict:
+        """
+        Randomizes the positions of atoms in a batch.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+
+        Returns
+        _______
+        batch: dict
+            A batch of data with randomized positions.
+        
+        """
         batch_list = self._split_batch(batch)
         for i in range(len(batch_list)):
             batch_list[i] = self._random_positions(batch_list[i])
@@ -466,7 +843,21 @@ class VPDiffusion(pl.LightningModule):
         batch = self._collate_batch(batch_list)
         return batch
 
-    def _split_batch(self, batch):
+    def _split_batch(self, batch: Dict) -> List:
+        """
+        Splits a batch of data into a list of batches.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+
+        Returns
+        _______
+        batch_list: list
+            A list of batches.
+        
+        """
         atom_types = batch[properties.Z]
         positions = batch[properties.R]
         n_atoms = batch[properties.n_atoms]
@@ -509,10 +900,40 @@ class VPDiffusion(pl.LightningModule):
 
         return output_list
 
-    def _collate_batch(self, batch_list):
+    def _collate_batch(self, batch_list: List) -> Dict:
+        """
+        Collates a list of batches into a single batch.
+
+        Args
+        ______
+        batch_list: list
+            A list of batches.
+
+        Returns
+        _______
+        batch: dict
+            A batch of data.
+        
+        """
+        
         return _atoms_collate_fn(batch_list)
 
-    def _random_positions(self, structure):
+    def _random_positions(self, structure: Dict) -> Dict:
+        """
+        Randomizes the positions of atoms in a structure.
+
+        Args
+        ______
+        structure: dict
+            A structure.
+
+        Returns
+        _______
+        structure: dict
+            A structure with randomized positions.
+        
+        """
+        
         positions = structure[properties.R]
         cell = structure[properties.cell].clone().view(3, 3)
         corner = torch.zeros(3)
