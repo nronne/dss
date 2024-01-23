@@ -93,8 +93,7 @@ def get_diffusion_model(cutoff=6.0):
     import schnetpack as spk
 
     from dss.diffusion import VPDiffusion
-    from dss.models import (ConditionalPaiNN, ConditionedScoreModel,
-                            NodeEmbedding, Potential)
+    from dss.models import ConditionedScoreModel, Potential
     from dss.utils import TorchNeighborList
 
     neighbour_list = TorchNeighborList(cutoff=cutoff)

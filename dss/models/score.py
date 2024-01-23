@@ -128,18 +128,3 @@ class ConditionedScoreModel(LightningModule):
         return vector
 
 
-class ScoreModel(LightningModule): # probably remove
-    def __init__(self, representation, **kwargs):
-        super().__init__(**kwargs)
-        self.representation = representation
-        self.net = spk.nn.blocks.build_gated_equivariant_mlp(
-            self.representation.embedding.dim, 1
-        )
-
-    def forward(self, batch, t=None, prob=0.0, condition=None):
-        inputs = self.representation(batch, t=t, prob=prob, condition=condition)
-        scalar_representation = inputs["scalar_representation"]
-        vector_representation = inputs["vector_representation"]
-
-        scalar, vector = self.net([scalar_representation, vector_representation])
-        return vector
