@@ -1,7 +1,12 @@
+
 def get_dataset(
     atoms,
     neighbour_list,
     path="dataset.db",
+    repeats=[1, 2],
+    mask_below_h=2.6,
+    z_confinement=[2.5, 7.8],
+    batch_size=32,
 ):
     import os
 
@@ -9,6 +14,20 @@ def get_dataset(
     import schnetpack.transform as trn
     from ase.calculators.singlepoint import SinglePointCalculator
     from schnetpack.data import ASEAtomsData, AtomsDataModule
+
+    data = []
+    for a in atoms:
+        e = a.get_potential_energy()
+        f = a.get_forces().reshape(-1, 3)
+        for r in repeats:
+            a1 = a.copy()
+            a1 = a1.repeat([r, r, 1])
+            f1 = np.vstack([f] * r**2)
+            a1.set_calculator(SinglePointCalculator(a1, energy=4 * e, forces=f1))
+
+            data.append(a1)
+
+    atoms = data
 
     print("=" * 10, "Creating dataset", "=" * 10)
     if os.path.exists(path):
@@ -23,9 +42,7 @@ def get_dataset(
         c = SinglePointCalculator(a, energy=e, forces=f)
         a.set_calculator(c)
         mask = np.zeros_like(f, dtype=bool)
-        mask[a.get_positions()[:, 2] < 2.6] = True
-
-        z_confinement = [2.5, 7.8]
+        mask[a.get_positions()[:, 2] < mask_below_h] = True
 
         properties = {
             "energy": np.array([e]),
@@ -63,7 +80,7 @@ def get_dataset(
 
     dataset = AtomsDataModule(
         path,
-        batch_size=32,
+        batch_size=batch_size,
         num_train=0.90,
         num_val=0.1,
         transforms=[
@@ -89,7 +106,15 @@ def get_dataset(
 
     return dataset
 
-def get_diffusion_model(cutoff=6.0):
+
+def get_diffusion_model(
+    cutoff=6.0,
+    n_atom_basis=64,
+    n_rbf=30,
+    n_interactions=4,
+    gated_blocks=4,
+    beta_max=3.0,
+):
     import schnetpack as spk
 
     from dss.diffusion import VPDiffusion
@@ -98,16 +123,17 @@ def get_diffusion_model(cutoff=6.0):
 
     neighbour_list = TorchNeighborList(cutoff=cutoff)
 
-    n_atom_basis = 64
-    radial_basis = spk.nn.GaussianRBF(n_rbf=30, cutoff=cutoff)
+    radial_basis = spk.nn.GaussianRBF(n_rbf=n_rbf, cutoff=cutoff)
     representation = spk.representation.PaiNN(
         n_atom_basis=n_atom_basis,
-        n_interactions=4,
+        n_interactions=n_interactions,
         radial_basis=radial_basis,
         cutoff_fn=spk.nn.CosineCutoff(cutoff),
     )
 
-    score_model = ConditionedScoreModel(representation, time_dim=2, gated_blocks=4)
+    score_model = ConditionedScoreModel(
+        representation, time_dim=2, gated_blocks=gated_blocks
+    )
 
     pred_energy = spk.atomistic.Atomwise(
         n_in=representation.n_atom_basis, output_key="energy"
@@ -128,19 +154,21 @@ def get_diffusion_model(cutoff=6.0):
         score_model=score_model,
         potential_model=potential,
         neighbour_list=neighbour_list,
-        beta_max=3.0,
+        beta_max=beta_max,
         optim_config={"lr": 1e-3},
         scheduler_config={"factor": 0.90, "patience": 100},
     )
 
     return diffusion, neighbour_list
 
-def sample(diffusion, num_samples, template, symbols):
+
+def sample(
+    diffusion, num_samples, template, symbols, z_confinement, num_steps=1000, eta=1e-2
+):
     import numpy as np
     import schnetpack as spk
     import torch
     from ase import Atoms
-    from ase.io import read, write
 
     def to_atoms(batch_list):
         atoms = []
@@ -165,12 +193,12 @@ def sample(diffusion, num_samples, template, symbols):
                     ]
                 )
             ),
-            "z_confinement": torch.tensor(np.array([2.5, 7.8])),
+            "z_confinement": z_confinement,
         },
     )
 
     # generate data
-    n_split = 50 if num_samples > 50 else num_samples
+    n_split = 64 if num_samples > 64 else num_samples
 
     all_atoms = []
     for i in range(num_samples // n_split):
@@ -193,7 +221,7 @@ def sample(diffusion, num_samples, template, symbols):
         data["_pbc"] = data["_pbc"].view(-1)  # hack
 
         batch = diffusion.regressor_guidance_sample(
-            data, num_steps=1000, save_traj=False, eta=1e-2
+            data, num_steps=num_steps, save_traj=False, eta=eta
         )
 
         # #save traj
