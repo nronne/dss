@@ -23,7 +23,7 @@ def get_dataset(
             a1 = a.copy()
             a1 = a1.repeat([r, r, 1])
             f1 = np.vstack([f] * r**2)
-            a1.set_calculator(SinglePointCalculator(a1, energy=4 * e, forces=f1))
+            a1.set_calculator(SinglePointCalculator(a1, energy=r**2 * e, forces=f1))
 
             data.append(a1)
 
