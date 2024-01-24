@@ -18,7 +18,7 @@ def get_dataset(
     data = []
     for a in atoms:
         e = a.get_potential_energy()
-        f = a.get_forces().reshape(-1, 3)
+        f = a.get_forces(apply_constraint=False).reshape(-1, 3)
         for r in repeats:
             a1 = a.copy()
             a1 = a1.repeat([r, r, 1])
