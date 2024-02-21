@@ -9,6 +9,7 @@ def get_dataset(
     batch_size=32,
 ):
     import os
+    import random
 
     import numpy as np
     import schnetpack.transform as trn
@@ -28,6 +29,7 @@ def get_dataset(
             data.append(a1)
 
     atoms = data
+    
 
     print("=" * 10, "Creating dataset", "=" * 10)
     if os.path.exists(path):
@@ -114,6 +116,8 @@ def get_diffusion_model(
     n_interactions=4,
     gated_blocks=4,
     beta_max=3.0,
+    beta_min=1e-2,
+    lr=1e-3,
 ):
     import schnetpack as spk
 
@@ -144,10 +148,6 @@ def get_diffusion_model(
         representation=representation,
         input_modules=[pairwise_distance],
         output_modules=[pred_energy, pred_forces],
-        postprocessors=[
-            # trn.CastTo64(),
-            # trn.AddOffsets("energy", add_atomrefs=False, add_mean=True),
-        ],
     )
 
     diffusion = VPDiffusion(
@@ -155,7 +155,8 @@ def get_diffusion_model(
         potential_model=potential,
         neighbour_list=neighbour_list,
         beta_max=beta_max,
-        optim_config={"lr": 1e-3},
+        beta_min=beta_min,
+        optim_config={"lr": lr},
         scheduler_config={"factor": 0.90, "patience": 100},
     )
 
@@ -163,12 +164,14 @@ def get_diffusion_model(
 
 
 def sample(
-    diffusion, num_samples, template, symbols, z_confinement, num_steps=1000, eta=1e-2
+        diffusion, num_samples, template, symbols, z_confinement, num_steps=1000, eta=1e-2, postrelax_steps=100,
+        return_trajectories=False,
 ):
     import numpy as np
     import schnetpack as spk
     import torch
     from ase import Atoms
+    from ase.calculators.singlepoint import SinglePointCalculator
 
     def to_atoms(batch_list):
         atoms = []
@@ -179,6 +182,12 @@ def sample(
                 cell=b["_cell"].detach().numpy().reshape(3, 3),
                 pbc=b["_pbc"].detach().numpy(),
             )
+            try:
+                e, f = b["energy"].item(), b["forces"].detach().numpy().reshape(-1, 3)
+                a.set_calculator(SinglePointCalculator(a, energy=e, forces=f))                
+            except:
+                print('No predicted energies and forces')
+
             atoms.append(a)
         return atoms
 
@@ -220,26 +229,35 @@ def sample(
         data = converter(atoms_data)
         data["_pbc"] = data["_pbc"].view(-1)  # hack
 
-        batch = diffusion.regressor_guidance_sample(
-            data, num_steps=num_steps, save_traj=False, eta=eta
-        )
+        if return_trajectories:
+            batch, traj_batch = diffusion.regressor_guidance_sample(
+                data, num_steps=num_steps, save_traj=True, eta=eta, postrelax_steps=postrelax_steps,
+            )
 
-        # #save traj
-        # all_trajs = [[] for _ in range(n_split)]
-        # for b in traj:
-        #     batch_list = diffusion._split_batch(b)
-        #     for j, item in enumerate(batch_list):
-        #         all_trajs[j].append(item)
+            # #save traj
+            all_trajs = [[] for _ in range(n_split)]
+            atoms_trajs = [[] for _ in range(n_split)]
+            for b in traj_batch:
+                batch_list = diffusion._split_batch(b)
+                for j, item in enumerate(batch_list):
+                    all_trajs[j].append(item)
 
-        # for j, batch_list in enumerate(all_trajs):
-        #     atoms = to_atoms(batch_list)
-        #     write(f'trajs-zconfined/sampled_{i*n_split + j}.traj', atoms)
+            for j, batch_list in enumerate(all_trajs):
+                atoms = to_atoms(batch_list)
+                atoms_trajs[j] = atoms
+        else:
+            batch = diffusion.regressor_guidance_sample(
+                data, num_steps=num_steps, save_traj=False, eta=eta, postrelax_steps=postrelax_steps
+            )
 
         # save final
-        batch_list = diffusion._split_batch(batch)
+        print(batch.keys())
+        batch_list = diffusion._split_batch(batch, keep_ef=True)
+        print(batch_list[0].keys())
         atoms = to_atoms(batch_list)
         all_atoms += atoms
 
-        # write("Ag6O3_Ag9_sampled_confined_RG.traj", all_atoms)
-
-    return all_atoms
+    if return_trajectories:
+        return all_atoms, atoms_trajs
+    else:
+        return all_atoms

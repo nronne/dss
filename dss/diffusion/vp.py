@@ -665,7 +665,9 @@ class VPDiffusion(pl.LightningModule):
         save_traj: bool=False,
         w: float=None,
         condition: torch.Tensor=None,
-        eta: float=1e-3) -> Dict:
+        eta: float=1e-3,
+        postrelax_steps=100,
+        fmax=0.05,) -> Dict:
         """
         This implements the Euler-Maruyama method for sampling from a diffusion process
         using regressor-guidance.
@@ -688,7 +690,7 @@ class VPDiffusion(pl.LightningModule):
         """
         assert self.potential_model is not None, "Potential model is not defined."
 
-        time_steps = torch.linspace(1, 0, num_steps)
+        time_steps = torch.linspace(1, self.eps, num_steps)
         step_size = time_steps[0] - time_steps[1]
         batch = self.batch_random_positions(batch)
 
@@ -704,13 +706,9 @@ class VPDiffusion(pl.LightningModule):
             disp = self.dispersion(time)
 
             batch = self.potential(batch)
-            if time > self.eps:
-                s = self.sample_forward(batch, t, w=w, condition=condition)
-                drift = disp**2 * s - self.forward_drift(batch[properties.R], t)
-                noise = torch.randn_like(batch[properties.R])
-            else:
-                drift = torch.zeros_like(batch[properties.R])
-                noise = torch.zeros_like(batch[properties.R])
+            s = self.sample_forward(batch, t, w=w, condition=condition)
+            drift = disp**2 * s - self.forward_drift(batch[properties.R], t)
+            noise = torch.randn_like(batch[properties.R])
 
             E, F = batch[properties.energy], batch[properties.forces]
             guidance = (1 - time) * eta * F
@@ -761,12 +759,27 @@ class VPDiffusion(pl.LightningModule):
             )
 
             batch = self.batch_wrap(batch)
-
+            
             if save_traj:
                 clone = self.batch_clone(batch)
                 clone["score"] = s
                 traj.append(clone)
 
+        batch = self.potential(batch)
+
+        if eta > 0:
+            for _ in range(postrelax_steps):
+                F = batch[properties.forces]
+                if (F < fmax).all():
+                    break
+                
+                step = eta * F
+                step[mask] = 0
+                batch[properties.R] = batch[properties.R] + step
+                
+                batch = self.potential(batch)
+
+                
         if save_traj:
             return batch, traj
         else:
@@ -843,7 +856,7 @@ class VPDiffusion(pl.LightningModule):
         batch = self._collate_batch(batch_list)
         return batch
 
-    def _split_batch(self, batch: Dict) -> List:
+    def _split_batch(self, batch: Dict, keep_ef=False) -> List:
         """
         Splits a batch of data into a list of batches.
 
@@ -851,6 +864,8 @@ class VPDiffusion(pl.LightningModule):
         ______
         batch: dict
             A batch of data.
+        keep_ef: bool
+            Whether to keep energy and forces.
 
         Returns
         _______
@@ -874,6 +889,12 @@ class VPDiffusion(pl.LightningModule):
         if z_confinement is not None:
             z_confinement = z_confinement.view(n_structures, 2)
 
+        if keep_ef:
+            energy = batch.get("energy", None)
+            forces = batch.get("forces", None)
+        else:
+            energy, forces = None, None
+
         output_list = []
         idx_c = 0
         for idx in range(n_structures):
@@ -894,6 +915,12 @@ class VPDiffusion(pl.LightningModule):
 
             if z_confinement is not None:
                 inputs["z_confinement"] = z_confinement[idx]
+
+            if energy is not None:
+                inputs["energy"] = energy[idx]
+            if forces is not None:
+                inputs["forces"] = forces[idx_c : idx_c + curr_n_atoms]
+                
 
             idx_c += curr_n_atoms
             output_list.append(inputs)
