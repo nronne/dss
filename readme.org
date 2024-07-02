@@ -1,4 +1,6 @@
-* Diffusion Structure Search
+* Generative diffusion model for surface structure discovery
+Package including generative diffusion model used in paper.
 
-* Acknowledge
-Nikolaj Rønne
+Released under the GPLv3 license.
+
+2024 Nikolaj Rønne

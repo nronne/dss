@@ -118,6 +118,7 @@ def get_diffusion_model(
     beta_max=3.0,
     beta_min=1e-2,
     lr=1e-3,
+    neighbour_list=None,
 ):
     import schnetpack as spk
 
@@ -125,7 +126,8 @@ def get_diffusion_model(
     from dss.models import ConditionedScoreModel, Potential
     from dss.utils import TorchNeighborList
 
-    neighbour_list = TorchNeighborList(cutoff=cutoff)
+    if neighbour_list is None:
+        neighbour_list = TorchNeighborList(cutoff)
 
     radial_basis = spk.nn.GaussianRBF(n_rbf=n_rbf, cutoff=cutoff)
     representation = spk.representation.PaiNN(
@@ -177,13 +179,13 @@ def sample(
         atoms = []
         for b in batch_list:
             a = Atoms(
-                numbers=b["_atomic_numbers"].detach().numpy(),
-                positions=b["_positions"].detach().numpy(),
-                cell=b["_cell"].detach().numpy().reshape(3, 3),
-                pbc=b["_pbc"].detach().numpy(),
+                numbers=b["_atomic_numbers"].cpu().detach().numpy(),
+                positions=b["_positions"].cpu().detach().numpy(),
+                cell=b["_cell"].cpu().detach().numpy().reshape(3, 3),
+                pbc=b["_pbc"].cpu().detach().numpy(),
             )
             try:
-                e, f = b["energy"].item(), b["forces"].detach().numpy().reshape(-1, 3)
+                e, f = b["energy"].cpu().item(), b["forces"].cpu().detach().numpy().reshape(-1, 3)
                 a.set_calculator(SinglePointCalculator(a, energy=e, forces=f))                
             except:
                 print('No predicted energies and forces')
@@ -204,6 +206,7 @@ def sample(
             ),
             "z_confinement": z_confinement,
         },
+        device='cuda'
     )
 
     # generate data
@@ -213,7 +216,7 @@ def sample(
     for i in range(num_samples // n_split):
         atoms_data = []
         for _ in range(n_split):
-            all_symbols = ["Ag"] * len(template) + symbols
+            all_symbols = template.get_chemical_symbols() + symbols #["Ag"] * len(template) + symbols
             positions = np.vstack(
                 (template.get_positions(), np.zeros((len(symbols), 3)))
             )
@@ -251,9 +254,7 @@ def sample(
             )
 
         # save final
-        print(batch.keys())
         batch_list = diffusion._split_batch(batch, keep_ef=True)
-        print(batch_list[0].keys())
         atoms = to_atoms(batch_list)
         all_atoms += atoms
 

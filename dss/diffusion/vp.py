@@ -39,6 +39,7 @@ class VPDiffusion(pl.LightningModule):
         },
         optim_config={"lr": 1e-3},
         scheduler_config={"factor": 0.05, "patience": 20},
+        verbose=True,
     ):
         """
         Args
@@ -93,6 +94,7 @@ class VPDiffusion(pl.LightningModule):
         self.condition_config = condition_config
         self.optim_config = optim_config
         self.scheduler_config = scheduler_config
+        self.verbose = verbose
 
     ### Diffusion Methods ###
 
@@ -406,6 +408,7 @@ class VPDiffusion(pl.LightningModule):
             and "vector_representation" not in batch
         ):
             batch = self.preprocess_batch(batch)
+
         v = self.score_model(batch, t, prob=prob, condition=condition).view(
             batch[properties.R].shape
         )
@@ -554,7 +557,8 @@ class VPDiffusion(pl.LightningModule):
 
         for key in saved:
             batch[key] = saved[key]
-
+            
+        batch = {p: batch[p].to(self.device) for p in batch}
         return batch
 
     ### Samplers ###
@@ -603,7 +607,7 @@ class VPDiffusion(pl.LightningModule):
             traj = [self.batch_clone(batch)]
 
         for time in time_steps:
-            t = torch.ones((batch["_idx_m"].shape[0], 1)) * time
+            t = torch.ones((batch["_idx_m"].shape[0], 1), device=self.device) * time
             disp = self.dispersion(time)
 
             s = self.sample_forward(batch, t, w=w, condition=condition)
@@ -690,10 +694,13 @@ class VPDiffusion(pl.LightningModule):
         """
         assert self.potential_model is not None, "Potential model is not defined."
 
-        time_steps = torch.linspace(1, self.eps, num_steps)
-        step_size = time_steps[0] - time_steps[1]
         batch = self.batch_random_positions(batch)
+        if num_steps == 0:
+            return batch
 
+        time_steps = torch.linspace(1, self.eps, num_steps, device=self.device)
+        step_size = time_steps[0] - time_steps[1]
+        
         mask = batch.get(
             "mask", torch.zeros_like(batch[properties.R], dtype=torch.bool)
         ).bool()
@@ -702,7 +709,7 @@ class VPDiffusion(pl.LightningModule):
             traj = [self.batch_clone(batch)]
 
         for time in time_steps:
-            t = torch.ones((batch["_idx_m"].shape[0], 1)) * time
+            t = torch.ones((batch["_idx_m"].shape[0], 1), device=self.device) * time
             disp = self.dispersion(time)
 
             batch = self.potential(batch)
@@ -727,6 +734,7 @@ class VPDiffusion(pl.LightningModule):
                 if not x_step.isfinite().all():
                     x_step[~x_step.isfinite()] = 0
 
+                old_R = batch[properties.R].clone()
                 batch[properties.R] = batch[properties.R] + x_step
 
                 noise_step = torch.sqrt(step_size) * disp * noise
@@ -737,13 +745,43 @@ class VPDiffusion(pl.LightningModule):
 
                 idx = 0
                 xz = torch.zeros_like(Rz)
+                n_out = torch.zeros_like(batch["_n_atoms"])
                 for i, n in enumerate(batch["_n_atoms"]):
+                    # check if any atoms are moved outside z_confinement by score model
+                    out_idx = (Rz[idx : (idx + n)] < z_confinement[i,0]) + (Rz[idx : (idx + n)] > z_confinement[i,1])
+                    out_idx[mask[idx : (idx + n), 2]] = False
+                    
+                    if out_idx.any():
+                        n_out[i] = 1
+                        # Now move them inside again at random
+                        random_xz = torch.rand_like(Rz[idx : (idx + n)])*(z_confinement[i, 1]-z_confinement[i, 0])+z_confinement[i, 0]
+                        Rz[idx : (idx + n)][out_idx] = random_xz[out_idx]
+
+                        
+                        Rxy = batch[properties.R][idx : (idx + n), :2].clone()
+                        cell = batch[properties.cell][i, :, :].clone().view(3, 3)[:2,:2]
+                        fxy = torch.rand_like(Rxy)
+                        Rxy[out_idx] = torch.matmul(fxy[out_idx], cell)
+                        batch[properties.R][idx : (idx + n), :2][out_idx] = Rxy[out_idx] # old_R[idx : (idx + n), :2][out_idx] # 
+                        
+
                     xz[idx : (idx + n)] = TruncatedNormal(
                         Rz[idx : (idx + n)],
                         torch.sqrt(step_size) * disp,
                         z_confinement[i, 0],
                         z_confinement[i, 1],
                     ).sample()
+
+                    # old except
+                    #     print('failed z confinement truncation.')
+                    #     new_xz = Rz[idx : (idx + n)].clone()
+                    #     fail_idx = (new_xz < z_confinement[i, 0]) + (new_xz > z_confinement[i, 1])
+                    #     random_xz = torch.rand_like(new_xz)*(z_confinement[i, 1]-z_confinement[i, 0])+z_confinement[i, 0]
+                    #     new_xz[fail_idx] = random_xz[fail_idx]
+                    #     # new_xz[mask[idx:(idx+n),2]] = Rz[idx : (idx + n)][mask[idx:(idx+n),2]]
+                        
+                    #     xz[idx : (idx + n)] = new_xz
+                        
                     idx += n
 
                 if not xz.isfinite().all():
@@ -754,11 +792,14 @@ class VPDiffusion(pl.LightningModule):
 
                 batch[properties.R] = batch[properties.R] + noise_step
 
-            print(
-                f"time: {time:.2f}, Mean energy: {E.mean():.2f}, Mean height: {batch[properties.R][:,2].mean():.2f}"
-            )
+
+            if self.verbose:
+                print(
+                    f"time: {time:.2f}, Mean energy: {E.mean():.2f}, Mean height: {batch[properties.R][:,2].mean():.2f}, Moved outside confinement: {sum(n_out)}/{len(n_out)}"
+                )
 
             batch = self.batch_wrap(batch)
+            # self.batch_check_fusion(batch)
             
             if save_traj:
                 clone = self.batch_clone(batch)
@@ -770,6 +811,7 @@ class VPDiffusion(pl.LightningModule):
         if eta > 0:
             for _ in range(postrelax_steps):
                 F = batch[properties.forces]
+                F = torch.nan_to_num(F, nan=0.0)                
                 if (F < fmax).all():
                     break
                 
@@ -779,7 +821,6 @@ class VPDiffusion(pl.LightningModule):
                 
                 batch = self.potential(batch)
 
-                
         if save_traj:
             return batch, traj
         else:
@@ -806,6 +847,28 @@ class VPDiffusion(pl.LightningModule):
         batch_list = self._split_batch(batch)
         for i in range(len(batch_list)):
             batch_list[i] = self.wrap_positions(batch_list[i])
+
+        batch = self._collate_batch(batch_list)
+        return batch
+
+    def batch_check_fusion(self, batch: Dict) -> Dict:  
+        """
+        Wraps all atoms into periodic cell in batch.
+
+        Args
+        ______
+        batch: dict
+            A batch of data.
+
+        Returns
+        _______
+        batch: dict
+            A batch of data with wrapped atoms.
+        
+        """
+        batch_list = self._split_batch(batch)
+        for i in range(len(batch_list)):
+            batch_list[i] = self._check_fusion(batch_list[i])
 
         batch = self._collate_batch(batch_list)
         return batch
@@ -963,7 +1026,7 @@ class VPDiffusion(pl.LightningModule):
         
         positions = structure[properties.R]
         cell = structure[properties.cell].clone().view(3, 3)
-        corner = torch.zeros(3)
+        corner = torch.zeros(3, device=positions.device)
 
         if structure.get("z_confinement", None) is not None:
             cell[2, 2] = structure["z_confinement"][1] - structure["z_confinement"][0]
@@ -973,8 +1036,18 @@ class VPDiffusion(pl.LightningModule):
             "mask", torch.zeros_like(positions, dtype=torch.bool)
         ).bool()
 
-        f = torch.rand_like(positions)
+        f = torch.rand_like(positions, device=positions.device)
         random_positions = torch.matmul(f, cell) + corner
         structure[properties.R][~mask] = random_positions[~mask]
 
         return structure
+    
+    def _check_fusion(self, structure: Dict) -> Dict:
+        R = structure[properties.R]
+        mask = structure.get(
+            "mask", torch.zeros_like(structure[properties.R], dtype=torch.bool)
+        ).bool()
+        X = R[~mask].view(-1, 3)
+        D = torch.cdist(X, X).fill_diagonal_(1e6)
+        if D.min() < 1.:
+            print("Atom fusion")
